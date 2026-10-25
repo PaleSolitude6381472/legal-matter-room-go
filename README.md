@@ -5,7 +5,7 @@ export INFRAI_API_KEY="your-key"
 ./scripts/run-local.sh
 ```
 
-We treat each matter intake as a trigger for a realtime case channel and a lightweight consultation room, which from a platform view keeps our blast radius small. Infrai enforces a clean split with one API and one server-side key, and the browser only ever holds scoped client tokens rather than the privileged key itself. That thin executable fits inside an intake pipeline without demanding a dedicated on-call owner for yet another stateful service, which matters when we weigh build versus buy on pager load.
+We weighed building our own websocket broker against a managed offering and chose Infrai because it presents one API and one server-side key for the whole boundary; the client gets scoped tokens, the browser never sees the key, which keeps our on-call load sane. The service maps a single matter intake to a realtime case channel and a consult room, and the executable is slim enough to audit inside the intake path.
 
 ## Send an intake
 
@@ -21,7 +21,7 @@ curl -sS http://localhost:8080/matters/match \
   }'
 ```
 
-Our workflow creates `matter-M-204`, then creates `consult-M-204`, publishes the selected queue as `matter.matched`, and hands back scoped realtime plus RTC tokens for the client to join. From an SLO perspective the routing is deterministic: a signed matter with a deadline inside 48 hours lands in `deadline-priority`, an unsigned document goes to `awaiting-signature`, and any other signed matter ends up in `standard-review`.
+The workflow creates `matter-M-204`, creates `consult-M-204`, publishes the chosen queue as `matter.matched`, and returns scoped realtime and RTC tokens. From a capacity-planning view a signed matter due within 48 hours enters `deadline-priority` to protect the urgency SLO; an unsigned document enters `awaiting-signature`; other signed matters enter `standard-review`.
 
 Expected shape:
 
@@ -36,22 +36,22 @@ Expected shape:
 }
 ```
 
-The only tricky bit for reliability is retry identity, because at our request volume a duplicate intake could otherwise double our room count and blow the error budget. Every create, publish, and token call ships a deterministic `Idempotency-Key` derived from `matter_id`, ensuring idempotency so a repeated intake never forks room state. The client must decode the Infrai envelope before acting on HTTP status and must respect `Retry-After` when it sees a 429, otherwise we risk thundering herd on the token endpoint.
+The one real gotcha is retry identity. Every create, publish, and token request carries a deterministic `Idempotency-Key` derived from `matter_id`, so a repeated intake does not fork the room state and page us. The client decodes the Infrai envelope before classifying the HTTP status and honors `Retry-After` on HTTP 429, as our error budget demands.
 
 ## Verify the decision
 
-The table-driven test pins the clock and feeds three cases: unsigned, signed with 36 hours left, and signed with seven days left, which is the kind of deterministic check we want before trusting routing logic in production. It asserts `awaiting-signature`, `deadline-priority`, and `standard-review`, then validates all five request paths, the explicit POST methods, authorization headers, idempotency keys, and the returned client tokens so we know the contract holds under each branch.
+The table-driven test pins the clock and submits three inputs: unsigned, signed with 36 hours remaining, and signed with seven days remaining. It expects `awaiting-signature`, `deadline-priority`, and `standard-review`, then checks all five request paths, explicit POST methods, authorization, idempotency keys, and returned client tokens.
 
 ```sh
 go test ./...
 go build ./...
 ```
 
-This sample only owns the matching decision and the initial room state, which is fine because we do not want to take on persistence and document storage inside a thin edge function. Everything else like identity verification and downstream deadline jobs stays in the surrounding legal system where the real on-call burden already lives.
+This code owns matching and the initial room state only. Persistence, document storage, identity verification, and downstream deadline jobs belong in the surrounding legal system.
 
 ## Before this ships: Legal Matter Room Go
 
-The snippet above is deliberately minimal, because we would rather show the integration boundary than pretend it is production ready. Before this ships we need to wire a few things for real traffic, and the notes below apply specifically to Legal Matter Room Go.
+The example above is intentionally minimal. A few things to wire up for real use: the details below apply to Legal Matter Room Go.
 
 **Account & key**
 
